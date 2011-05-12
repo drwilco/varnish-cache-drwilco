@@ -67,12 +67,6 @@
 #include "vcc_compile.h"
 #include "libvarnish.h"
 
-struct host {
-	VTAILQ_ENTRY(host)      list;
-	struct token            *name;
-	char			*vgcname;
-};
-
 static int
 emit_sockaddr(struct vcc *tl, void *sa, unsigned sal)
 {
@@ -395,6 +389,28 @@ vcc_ParseProbe(struct vcc *tl)
 }
 
 /*--------------------------------------------------------------------
+ * Add a director to finis for EmitFiniFunc to use. We do this instead
+ * of Ff because directors need to be destroyed in reverse order for
+ * nested directors.
+ */
+
+static void
+vcc_AddDirectorFini(struct vcc *tl, const char *fmt, ...)
+{
+	va_list		ap;
+	char		text[BUFSIZ];
+	struct fini	*f;
+
+	f = TlAlloc(tl, sizeof *f);
+	va_start(ap, fmt);
+	vsprintf(text, fmt, ap);
+	va_end(ap);
+	f->text = TlDup(tl, text);
+	/* insert at head so that the last director is destroyed first */
+	VTAILQ_INSERT_HEAD(&tl->finis, f, list);
+}
+
+/*--------------------------------------------------------------------
  * Parse and emit a backend host definition
  *
  * The struct vrt_backend is emitted to Fh().
@@ -573,7 +589,7 @@ vcc_ParseHostDef(struct vcc *tl, int serial, const char *vgcname)
 
 	Fi(tl, 0, "\tVRT_init_dir(cli, VCL_conf.director, \"simple\",\n"
 	    "\t    VGC_backend_%s, &vgc_dir_priv_%s);\n", vgcname, vgcname);
-	Ff(tl, 0, "\tVRT_fini_dir(cli, VGCDIR(%s));\n", vgcname);
+	vcc_AddDirectorFini(tl, "\tVRT_fini_dir(cli, VGCDIR(%s));\n", vgcname);
 	tl->ndirector++;
 }
 
@@ -592,28 +608,27 @@ vcc_ParseHostDef(struct vcc *tl, int serial, const char *vgcname)
 void
 vcc_ParseBackendHost(struct vcc *tl, int serial, char **nm)
 {
-	struct host *h;
+	struct symbol *s;
 	struct token *t;
 	char vgcname[BUFSIZ];
 
 	AN(nm);
 	*nm = NULL;
 	if (tl->t->tok == ID) {
-		VTAILQ_FOREACH(h, &tl->hosts, list) {
-			if (vcc_Teq(h->name, tl->t))
-				break;
-		}
-		if (h == NULL) {
-			VSB_printf(tl->sb, "Reference to unknown backend ");
+		s = VCC_FindSymbol(tl, tl->t, SYM_BACKEND);
+		if (s == NULL) {
+			VSB_printf(tl->sb,
+			    "Reference to unknown backend or director ");
 			vcc_ErrToken(tl, tl->t);
 			VSB_printf(tl->sb, " at\n");
 			vcc_ErrWhere(tl, tl->t);
 			return;
 		}
-		vcc_AddRef(tl, h->name, SYM_BACKEND);
+		sprintf(vgcname, "_%.*s", PF(tl->t));
+		vcc_AddRef(tl, tl->t, SYM_BACKEND);
 		vcc_NextToken(tl);
 		SkipToken(tl, ';');
-		*nm = h->vgcname;
+		*nm = TlDup(tl, vgcname);
 	} else if (tl->t->tok == '{') {
 		t = tl->t;
 
@@ -625,7 +640,7 @@ vcc_ParseBackendHost(struct vcc *tl, int serial, char **nm)
 			    "\nIn backend host specification starting at:\n");
 			vcc_ErrWhere(tl, t);
 		}
-		*nm = strdup(vgcname);	 /* XXX */
+		*nm = TlDup(tl, vgcname);
 
 		return;
 	} else {
@@ -667,21 +682,15 @@ vcc_DefBackend(struct vcc *tl, const struct token *nm)
 static void
 vcc_ParseSimpleDirector(struct vcc *tl)
 {
-	struct host *h;
 	char vgcname[BUFSIZ];
 
-	h = TlAlloc(tl, sizeof *h);
-	h->name = tl->t_dir;
 	vcc_DefBackend(tl, tl->t_dir);
 	ERRCHK(tl);
-	sprintf(vgcname, "_%.*s", PF(h->name));
-	h->vgcname = TlAlloc(tl, strlen(vgcname) + 1);
-	strcpy(h->vgcname, vgcname);
+	sprintf(vgcname, "_%.*s", PF(tl->t_dir));
 
 	vcc_ParseHostDef(tl, -1, vgcname);
 	ERRCHK(tl);
 
-	VTAILQ_INSERT_TAIL(&tl->hosts, h, list);
 }
 
 /*--------------------------------------------------------------------
@@ -738,7 +747,7 @@ vcc_ParseDirector(struct vcc *tl)
 			vcc_ErrWhere(tl, tl->t_policy);
 			return;
 		}
-		Ff(tl, 0, "\tVRT_fini_dir(cli, VGCDIR(_%.*s));\n",
+		vcc_AddDirectorFini(tl, "\tVRT_fini_dir(cli, VGCDIR(_%.*s));\n",
 		    PF(tl->t_dir));
 		SkipToken(tl, '{');
 		dl->func(tl);

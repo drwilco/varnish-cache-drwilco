@@ -71,6 +71,11 @@ struct token {
 	char			*dec;
 };
 
+struct fini {
+	VTAILQ_ENTRY(fini)	list;
+	char			*text;
+};
+
 enum symkind {
 #define VCC_SYMB(uu, ll, dd)	SYM_##uu,
 #include "symbol_kind.h"
@@ -129,7 +134,6 @@ struct vcc {
 	struct tokenhead	tokens;
 	VTAILQ_HEAD(, source)	sources;
 	VTAILQ_HEAD(, membit)	membits;
-	VTAILQ_HEAD(, host)	hosts;
 	unsigned		nsources;
 	struct source		*src;
 	struct token		*t;
@@ -143,6 +147,7 @@ struct vcc {
 	struct vsb		*fh;		/* H-code (before C-code) */
 	struct vsb		*fi;		/* Init func code */
 	struct vsb		*ff;		/* Finish func code */
+	VTAILQ_HEAD(, fini)	finis;
 	struct vsb		*fb;		/* Body of current sub
 						 * NULL otherwise
 						 */
