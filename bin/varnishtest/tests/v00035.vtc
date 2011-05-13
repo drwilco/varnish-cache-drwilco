@@ -1,0 +1,150 @@
+varnishtest "Destruction of stacked directors"
+
+server s1 {
+	rxreq
+	txresp -hdr "Foo: 1" -body "1"
+	rxreq
+	txresp -hdr "Foo: 3" -body "3"
+	rxreq
+	txresp -hdr "Foo: 1" -body "1"
+	rxreq
+	txresp -hdr "Foo: 3" -body "3"
+	rxreq
+	txresp -hdr "Foo: 1" -body "1"
+	rxreq
+	txresp -hdr "Foo: 3" -body "3"
+} -start
+
+server s2 {
+	rxreq
+	txresp -hdr "Foo: 2" -body "2"
+	rxreq
+	txresp -hdr "Foo: 4" -body "4"
+	rxreq
+	txresp -hdr "Foo: 2" -body "2"
+	rxreq
+	txresp -hdr "Foo: 4" -body "4"
+	rxreq
+	txresp -hdr "Foo: 2" -body "2"
+	rxreq
+	txresp -hdr "Foo: 4" -body "4"
+} -start
+
+
+varnish v1 -vcl+backend {
+	director h1 random {
+		{ .backend = s1; .weight = 1; }
+	}
+	director h2 random {
+		{ .backend = s2; .weight = 1; }
+	}
+	director rr round-robin {
+		{ .backend = h1; }
+		{ .backend = h2; }
+	}
+
+	sub vcl_recv {
+		set req.backend = rr;
+		return(pass);
+	}
+
+} -start
+
+varnish v1 -cliok "param.set session_linger 0"
+varnish v1 -cliok "param.set expiry_sleep 0"
+
+varnish v1 -expect n_backend == 2
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.http.foo == "1"
+
+	txreq
+	rxresp
+	expect resp.http.foo == "2"
+
+	txreq
+	rxresp
+	expect resp.http.foo == "3"
+
+	txreq
+	rxresp
+	expect resp.http.foo == "4"
+
+
+} -run
+
+varnish v1 -vcl+backend {
+	director h2 random {
+		{ .backend = s1; .weight = 1; }
+	}
+	director h3 random {
+		{ .backend = s2; .weight = 1; }
+	}
+	director rr round-robin {
+		{ .backend = h2; }
+		{ .backend = h3; }
+	}
+
+	sub vcl_recv {
+		set req.backend = rr;
+		return(pass);
+	}
+
+}
+
+varnish v1 -expect n_backend == 2
+varnish v1 -expect n_vcl == 2
+
+client c1 -run
+
+varnish v1 -cli "vcl.discard vcl1"
+
+varnish v1 -expect n_backend == 2
+varnish v1 -expect n_vcl == 1
+
+varnish v1 -vcl+backend {
+	director h1 random {
+		{ .backend = s1; .weight = 1; }
+	}
+	director h2 random {
+		{ .backend = s2; .weight = 1; }
+	}
+	director h3 random {
+		{ .backend = s1; .weight = 1; }
+	}
+	director rr1 round-robin {
+		{ .backend = h3; }
+		{ .backend = h2; }
+	}
+	director rr2 round-robin {
+		{ .backend = h1; }
+		{ .backend = h2; }
+	}
+
+	sub vcl_recv {
+		if (1 == 0) {
+			set req.backend = rr2;
+			return(pass);
+		} else {
+			set req.backend = rr1;
+			return(pass);
+		}
+	}
+
+}
+
+varnish v1 -expect n_backend == 2
+varnish v1 -expect n_vcl == 2
+
+client c1 -run
+
+varnish v1 -cli "vcl.discard vcl2"
+
+varnish v1 -cli "vcl.list"
+
+varnish v1 -expect n_backend == 2
+varnish v1 -expect n_vcl == 1
+
+
