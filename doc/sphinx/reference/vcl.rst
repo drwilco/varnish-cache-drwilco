@@ -163,6 +163,21 @@ Configuring a director may look like this:::
     }
   } 
 
+Directors can also use other directors as a backend:::
+
+  director cluster1 hash {
+    { .backend = { .host = "cl1n1"; } .weight = 1; }
+    { .backend = { .host = "cl1n2"; } .weight = 1; }
+  }
+  director cluster2 hash {
+    { .backend = { .host = "cl2n1"; } .weight = 1; }
+    { .backend = { .host = "cl2n2"; } .weight = 1; }
+  }
+  director default random {
+    { .backend = cluster1; .weight = 1; }
+    { .backend = cluster2; .weight = 1; }
+  }
+
 The family of random directors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
