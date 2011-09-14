@@ -1,0 +1,56 @@
+varnishtest "Director stacking"
+
+server s1 {
+	rxreq
+	txresp -hdr "Foo: 1" -body "1"
+	rxreq
+	txresp -hdr "Foo: 3" -body "3"
+} -start
+
+server s2 {
+	rxreq
+	txresp -hdr "Foo: 2" -body "2"
+	rxreq
+	txresp -hdr "Foo: 4" -body "4"
+} -start
+
+
+varnish v1 -vcl+backend {
+	director h1 random {
+		{ .backend = s1; .weight = 1; }
+	}
+	director h2 random {
+		{ .backend = s2; .weight = 1; }
+	}
+	director rr round-robin {
+		{ .backend = h1; }
+		{ .backend = h2; }
+	}
+
+	sub vcl_recv {
+		set req.backend = rr;
+		return(pass);
+	}
+
+}
+
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.http.foo == "1"
+
+	txreq
+	rxresp
+	expect resp.http.foo == "2"
+
+	txreq
+	rxresp
+	expect resp.http.foo == "3"
+
+	txreq
+	rxresp
+	expect resp.http.foo == "4"
+
+
+} -run
