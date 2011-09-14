@@ -83,10 +83,11 @@ static int njob = 0;
 static int npar = 1;			/* Number of parallel tests */
 static unsigned vtc_maxdur = 60;	/* Max duration of any test */
 static int vtc_continue;		/* Continue on error */
-static int vtc_verbosity = 1;		/* Verbosity Level */
 static int vtc_good;
 static int vtc_fail;
 static int leave_temp;
+
+int vtc_verbosity = 1;			/* Verbosity Level */
 
 /**********************************************************************
  * Parse a -D option argument into a name/val pair, and insert
@@ -370,7 +371,7 @@ main(int argc, char * const *argv)
 			vtc_maxdur = strtoul(optarg, NULL, 0);
 			break;
 		case 'v':
-			if (vtc_verbosity < 2)
+			if (vtc_verbosity < 3)
 				vtc_verbosity++;
 			break;
 		default:

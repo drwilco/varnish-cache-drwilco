@@ -37,6 +37,7 @@
 #include <signal.h>
 #include <poll.h>
 #include <inttypes.h>
+#include <ctype.h>
 
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -50,6 +51,7 @@
 #include "cli_common.h"
 #include "vss.h"
 #include "vsb.h"
+#include "vsl.h"
 
 #include "vtc.h"
 
@@ -57,8 +59,10 @@ struct varnish {
 	unsigned		magic;
 #define VARNISH_MAGIC		0x208cd8e3
 	char			*name;
+	/* one log per thread */
 	struct vtclog		*vl;
 	struct vtclog		*vl1;
+	struct vtclog		*vl2;
 	VTAILQ_ENTRY(varnish)	list;
 
 	struct vsb		*storage;
@@ -68,15 +72,27 @@ struct varnish {
 	pid_t			pid;
 
 	pthread_t		tp;
+	pthread_t		ltp;
+	pthread_mutex_t		lsmtx;
+	pthread_cond_t		lscnd;
 
 	int			cli_fd;
 	int			vcl_nbr;
 	char			*workdir;
 
 	struct VSM_data		*vd;
+
+	/* XXX merge lvd with vd once VSM_Setup allows it */
+	struct VSM_data		*lvd;
+	int			lr;
+	int			ts[256];
+	struct VSM_data		*revd;
+	int			reh;
 };
 
 #define NONSENSE	"%XJEIFLH|)Xspa8P"
+
+#define SLEEP_USEC	(50*1000)
 
 static VTAILQ_HEAD(, varnish)	varnishes =
     VTAILQ_HEAD_INITIALIZER(varnishes);
@@ -113,6 +129,51 @@ varnish_ask_cli(const struct varnish *v, const char *cmd, char **repl)
 	else
 		free(r);
 	return ((enum VCLI_status_e)retval);
+}
+
+/**********************************************************************
+ * Varnishlog gatherer + thread
+ */
+
+static int
+h_addlog(void *priv, enum VSL_tag_e tag, unsigned fd, unsigned len,
+    unsigned spec, const char *ptr, uint64_t bitmap)
+{
+	struct varnish *v;
+	int type;
+
+	(void) bitmap;
+
+	type = (spec & VSL_S_CLIENT) ? 'c' :
+	    (spec & VSL_S_BACKEND) ? 'b' : '-';
+	CAST_OBJ_NOTNULL(v, priv, VARNISH_MAGIC);
+
+	v->ts[tag]++;
+
+	if (vtc_verbosity > 2)
+		vtc_log(v->vl2, 4, "varnishlog| %5u %-12s %c %.*s", fd,
+		    VSL_tags[tag], type, len, ptr);
+	return (0);
+}
+
+static void *
+varnishlog_thread(void *priv)
+{
+	struct varnish *v;
+
+	CAST_OBJ_NOTNULL(v, priv, VARNISH_MAGIC);
+	while (v->lr && VSL_Open(v->lvd, 0) != 0) {
+		assert(usleep(SLEEP_USEC) == 0 || errno == EINTR);
+	}
+	while (v->lr) {
+		(void) VSL_Dispatch(v->lvd, h_addlog, v);
+		/* tell main thread we're at the end of the log */
+		pthread_mutex_lock(&v->lsmtx);
+		pthread_cond_signal(&v->lscnd);
+		pthread_mutex_unlock(&v->lsmtx);
+		assert(usleep(SLEEP_USEC) == 0 || errno == EINTR);
+	}
+	return (NULL);
 }
 
 /**********************************************************************
@@ -157,6 +218,19 @@ varnish_new(const char *name)
 	VSB_printf(v->storage, "-sfile,%s,10M", v->workdir);
 	AZ(VSB_finish(v->storage));
 
+	v->vl2 = vtc_logopen(name);
+	AN(v->vl2);
+
+	v->lvd = VSM_New();
+	VSL_Setup(v->lvd);
+
+	(void)VSL_Arg(v->lvd, 'n', v->workdir);
+	(void)VSL_Arg(v->lvd, 'd', NULL);
+	v->lr = 1;
+	AZ(pthread_mutex_init(&v->lsmtx, NULL));
+	AZ(pthread_cond_init(&v->lscnd, NULL));
+	AZ(pthread_create(&v->ltp, NULL, varnishlog_thread, v));
+
 	v->cli_fd = -1;
 	VTAILQ_INSERT_TAIL(&varnishes, v, list);
 
@@ -171,13 +245,23 @@ varnish_new(const char *name)
 static void
 varnish_delete(struct varnish *v)
 {
+	void *p;
 
 	CHECK_OBJ_NOTNULL(v, VARNISH_MAGIC);
+	v->lr = 0;
+	AZ(pthread_join(v->ltp, &p));
+	AZ(pthread_mutex_destroy(&v->lsmtx));
+	AZ(pthread_cond_destroy(&v->lscnd));
 	vtc_logclose(v->vl);
+	vtc_logclose(v->vl1);
+	vtc_logclose(v->vl2);
 	free(v->name);
 	free(v->workdir);
+	VSB_delete(v->storage);
 	if (v->vd != NULL)
 		VSM_Delete(v->vd);
+	if (v->lvd != NULL)
+		VSM_Delete(v->lvd);
 
 	/*
 	 * We do not delete the workdir, it may contain stuff people
@@ -353,7 +437,7 @@ varnish_launch(struct varnish *v)
 		vtc_log(v->vl, 0, "CLI auth command failed: %u %s", u, r);
 	free(r);
 
-	(void)VSL_Arg(v->vd, 'n', v->workdir);
+	(void)VSC_Arg(v->vd, 'n', v->workdir);
 	AZ(VSC_Open(v->vd, 1));
 }
 
@@ -371,6 +455,7 @@ varnish_start(struct varnish *v)
 		varnish_launch(v);
 	if (vtc_error)
 		return;
+	memset(&v->ts, 0, sizeof v->ts);
 	vtc_log(v->vl, 2, "Start");
 	u = varnish_ask_cli(v, "start", &resp);
 	if (vtc_error)
@@ -663,6 +748,103 @@ varnish_expect(const struct varnish *v, char * const *av) {
 }
 
 /**********************************************************************
+ * Check varnishlog for VSL tags
+ */
+
+static void
+varnish_logexpecttag(struct varnish *v, const int exp, const char *tag)
+{
+	int i, j, tl, ul;
+	const char *t, *u;
+
+	/* Make sure log is caught up */
+	pthread_mutex_lock(&v->lsmtx);
+	pthread_cond_wait(&v->lscnd, &v->lsmtx);
+	pthread_mutex_unlock(&v->lsmtx);
+
+	tl = strlen(tag);
+	for (i = 0; i < 256; i++) {
+		if (VSL_tags[i] == NULL)
+			continue;
+		u = VSL_tags[i];
+		ul = strlen(u);
+		if (ul != tl)
+			continue;
+		t = tag;
+		for (j = 0; j < tl; j++)
+			if (tolower(*t++) != tolower(*u++))
+				break;
+		if (j == tl) {
+			j = v->ts[i]; /* single read, so no mutex */
+			if (j == exp)
+				vtc_log(v->vl, 2, "as expected, found %s %d "
+				    "times", VSL_tags[i], exp);
+			else
+				vtc_log(v->vl, 0, "Found %s %d times, expected"
+				    " %d times", VSL_tags[i], j, exp);
+			return;
+		}
+	}
+	vtc_log(v->vl, 0, "Unknown tag: %s", tag);
+}
+
+/**********************************************************************
+ * Check varnishlog for regexes
+ */
+
+static int
+h_count(void *priv, enum VSL_tag_e tag, unsigned fd, unsigned len,
+    unsigned spec, const char *ptr, uint64_t bitmap)
+{
+	struct varnish *v;
+
+	(void) tag;
+	(void) fd;
+	(void) len;
+	(void) spec;
+	(void) ptr;
+	(void) bitmap;
+	CAST_OBJ_NOTNULL(v, priv, VARNISH_MAGIC);
+	v->reh++;
+	return (0);
+}
+
+static void
+varnish_logexpectregex(struct varnish *v, const int exp, const char *pat)
+{
+
+	v->revd = VSM_New();
+	VSL_Setup(v->revd);
+
+	(void)VSL_Arg(v->revd, 'n', v->workdir);
+	(void)VSL_Arg(v->revd, 'd', NULL);
+	if (!VSL_Arg(v->revd, 'I', pat)) {
+		vtc_log(v->vl, 0, "Regex error: %s", pat);
+		return;
+	}
+
+	v->reh = 0;
+
+	if (VSL_Open(v->revd, 0)) {
+		vtc_log(v->vl, 0, "VSL_Open failed");
+		return;
+	}
+	if (VSL_Dispatch(v->revd, h_count, v) != -1) {
+		vtc_log(v->vl, 0, "VSL_Dispatch failed");
+		return;
+	}
+
+	VSM_Delete(v->revd);
+
+	if (exp == v->reh)
+		vtc_log(v->vl, 2, "as expected, matched \"%s\" %d times", pat,
+		    exp);
+	else
+		vtc_log(v->vl, 0, "Matched \"%s\" %d times, expected %d", pat,
+		    v->reh, exp);
+
+}
+/**********************************************************************
  * Varnish server cmd dispatch
  */
 
@@ -764,8 +946,25 @@ cmd_varnish(CMD_ARGS)
 			continue;
 		}
 		if (!strcmp(*av, "-expect")) {
+			AN(av[1]);
+			AN(av[2]);
+			AN(av[3]);
 			av++;
 			varnish_expect(v, av);
+			av += 2;
+			continue;
+		}
+		if (!strcmp(*av, "-logexpecttag")) {
+			AN(av[1]);
+			AN(av[2]);
+			varnish_logexpecttag(v, atoi(av[1]), av[2]);
+			av += 2;
+			continue;
+		}
+		if (!strcmp(*av, "-logexpectregex")) {
+			AN(av[1]);
+			AN(av[2]);
+			varnish_logexpectregex(v, atoi(av[1]), av[2]);
 			av += 2;
 			continue;
 		}

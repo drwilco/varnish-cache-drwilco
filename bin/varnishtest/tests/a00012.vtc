@@ -1,0 +1,94 @@
+varnishtest "Test varnishlog function"
+
+server s1 {
+	rxreq
+	txresp -hdr "X-Foo: Bar" -hdr "Cache-Control: max-age=0"
+} -start
+server s2 {
+	rxreq
+	txresp -hdr "X-Foo: Bar" -hdr "Cache-Control: max-age=0"
+} -start
+
+varnish v1 -vcl+backend {
+import std from "${topbuild}/lib/libvmod_std/.libs/libvmod_std.so";
+	sub vcl_recv {
+		set req.backend = s2;
+		set req.backend = s1;
+		std.log("this is v1");
+	}
+} -start
+
+varnish v2 -vcl+backend {
+import std from "${topbuild}/lib/libvmod_std/.libs/libvmod_std.so";
+	sub vcl_recv {
+		set req.backend = s1;
+		set req.backend = s2;
+		std.log("this is v2");
+		std.log("no really!");
+	}
+} -start
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.http.X-Foo == "Bar"
+} -run
+
+client c2 -connect ${v2_sock} {
+	txreq
+	rxresp
+	expect resp.http.X-Foo == "Bar"
+} -run
+
+# give the log a moment to catch up
+delay 0.2
+
+# there should be no crosstalk
+varnish v1 -logexpecttag 1 VCL_Log
+varnish v2 -logexpecttag 2 VCL_Log
+
+# shouldn't be case sensitive
+varnish v1 -logexpecttag 1 vcl_log
+varnish v1 -logexpecttag 1 vcl_lOG
+
+varnish v1 -logexpecttag 1 RxURL
+
+server s1 -wait
+
+varnish v1 -stop -start
+
+server s1 {
+	rxreq
+	txresp -hdr "X-Foo: Bar"
+} -start
+
+varnish v1 -logexpecttag 0 RxURL
+
+client c1 {
+	txreq
+	rxresp
+	expect resp.http.X-Foo == "Bar"
+} -run
+
+delay 0.2
+
+varnish v1 -logexpectregex 3 "X-Foo: Bar"
+varnish v1 -logexpectregex 3 "X-Foo: B.."
+
+# check proper multiline handling
+varnish v1 -logexpectregex 3 "^X-Foo: Bar"
+varnish v1 -logexpectregex 3 "X-Foo: Bar$"
+varnish v1 -logexpectregex 0 "^Bar"
+varnish v1 -logexpectregex 0 "X-Foo$"
+
+# there should be no crosstalk
+varnish v1 -logexpectregex 1 "^this is v1$"
+varnish v1 -logexpectregex 0 "^this is v2$"
+varnish v2 -logexpectregex 0 "^this is v1$"
+varnish v2 -logexpectregex 1 "^this is v2$"
+
+# and finally, nothing should be found after a restart
+varnish v1 -stop -start
+delay 0.2
+varnish v1 -logexpectregex 0 "X-Foo: Bar"
+varnish v1 -logexpecttag 0 VCL_Log
