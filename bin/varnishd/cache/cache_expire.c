@@ -451,6 +451,49 @@ EXP_NukeOne(struct worker *wrk, struct lru *lru)
 }
 
 /*--------------------------------------------------------------------
+ * Remove from expiry binheap. Caller must have a ref on the oc.
+ */
+
+void
+EXP_Remove(struct worker *w, struct objcore *oc)
+{
+	struct object *o;
+	struct lru *l;
+
+	CHECK_OBJ_NOTNULL(oc, OBJCORE_MAGIC);
+	o = oc_getobj(w, oc);
+	CHECK_OBJ_NOTNULL(o, OBJECT_MAGIC);
+	l = oc_getlru(oc);
+	CHECK_OBJ_NOTNULL(l, LRU_MAGIC);
+
+	Lck_Lock(&l->mtx);
+	Lck_Lock(&exp_mtx);
+
+	if (oc->timer_idx == BINHEAP_NOIDX) { /* exp_timer has it */
+		Lck_Unlock(&exp_mtx);
+		Lck_Unlock(&l->mtx);
+		return;
+	}
+
+	/* remove from binheap */
+	binheap_delete(exp_heap, oc->timer_idx);
+	assert(oc->timer_idx == BINHEAP_NOIDX);
+
+	/* And from LRU */
+	CHECK_OBJ_NOTNULL(l, LRU_MAGIC);
+	VTAILQ_REMOVE(&l->lru_head, oc, lru_list);
+
+	Lck_Unlock(&exp_mtx);
+	Lck_Unlock(&l->mtx);
+
+	w->stats.c_removed++;
+
+	WSL(w, SLT_ExpKill, 0, "%u Removed", o->xid);
+	assert(oc->refcnt >= 2); /* exp ref and caller ref */
+	HSH_Deref(w, NULL, &o);
+}
+
+/*--------------------------------------------------------------------
  * BinHeap helper functions for objcore.
  */
 

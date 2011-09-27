@@ -296,7 +296,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 	struct worker *wrk;
 	struct objhead *oh;
 	struct objcore *oc;
-	struct objcore *busy_oc, *grace_oc;
+	struct objcore *busy_oc;
 	struct object *o;
 	double grace_ttl;
 
@@ -332,7 +332,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 	Lck_Lock(&oh->mtx);
 	assert(oh->refcnt > 0);
 	busy_oc = NULL;
-	grace_oc = NULL;
+	sp->req->grace_oc = NULL;
 	grace_ttl = NAN;
 	VTAILQ_FOREACH(oc, &oh->objcs, list) {
 		/* Must be at least our own ref + the objcore we examine */
@@ -372,9 +372,9 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 		 * and if there are several, use the least expired one.
 		 */
 		if (EXP_Grace(sp, o) >= sp->t_req) {
-			if (grace_oc == NULL ||
+			if (sp->req->grace_oc == NULL ||
 			    grace_ttl < o->exp.entered + o->exp.ttl) {
-				grace_oc = oc;
+				sp->req->grace_oc = oc;
 				grace_ttl = o->exp.entered + o->exp.ttl;
 			}
 		}
@@ -391,15 +391,16 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 	 */
 
 	AZ(sp->req->objcore);
-	sp->req->objcore = grace_oc;		/* XXX: Hack-ish */
-	if (oc == NULL			/* We found no live object */
-	    && grace_oc != NULL		/* There is a grace candidate */
-	    && (busy_oc != NULL		/* Somebody else is already busy */
+	sp->req->objcore = sp->req->grace_oc;		/* XXX: Hack-ish */
+	if (oc == NULL			 /* We found no live object */
+	    && sp->req->grace_oc != NULL /* There is a grace candidate */
+	    && (busy_oc != NULL		 /* Somebody else is already busy */
 	    || !VDI_Healthy(sp->req->director, sp))) {
 					/* Or it is impossible to fetch */
-		o = oc_getobj(sp->wrk, grace_oc);
+		o = oc_getobj(sp->wrk, sp->req->grace_oc);
 		CHECK_OBJ_NOTNULL(o, OBJECT_MAGIC);
-		oc = grace_oc;
+		oc = sp->req->grace_oc;
+		sp->req->grace_oc = NULL;
 	}
 	sp->req->objcore = NULL;
 
@@ -415,6 +416,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 		assert(oh->refcnt > 1);
 		Lck_Unlock(&oh->mtx);
 		assert(hash->deref(oh));
+		sp->req->grace_oc = NULL;
 		*poh = oh;
 		return (oc);
 	}
@@ -441,6 +443,7 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 		 */
 		sp->req->hash_objhead = oh;
 		sp->wrk = NULL;
+		sp->req->grace_oc = NULL;
 		Lck_Unlock(&oh->mtx);
 		return (NULL);
 	}
@@ -450,6 +453,15 @@ HSH_Lookup(struct sess *sp, struct objhead **poh)
 	wrk->nobjcore = NULL;
 	AN(oc->flags & OC_F_BUSY);
 	oc->refcnt = 1;
+	/* 
+	 * make sure that we don't expire the graced object while we're fetching
+	 * so that we don't panic/segfault after fetch
+	 */
+	if (sp->req->grace_oc) {
+		CHECK_OBJ_NOTNULL(sp->req->grace_oc, OBJCORE_MAGIC);
+		sp->req->grace_oc->refcnt++; 
+		assert(sp->req->grace_oc->refcnt > 0);
+	}
 
 	AZ(wrk->busyobj);
 	wrk->busyobj = VBO_GetBusyObj(wrk);
@@ -586,16 +598,16 @@ HSH_Drop(struct worker *wrk)
 	AssertObjCorePassOrBusy(o->objcore);
 	o->exp.ttl = -1.;
 	if (o->objcore != NULL)		/* Pass has no objcore */
-		HSH_Unbusy(wrk);
+		HSH_Unbusy(wrk, 0);
 	(void)HSH_Deref(wrk, NULL, &wrk->sp->req->obj);
 }
 
 void
-HSH_Unbusy(struct worker *wrk)
+HSH_Unbusy(struct worker *wrk, int dropgrace)
 {
-	struct object *o;
+	struct object *o, *go;
 	struct objhead *oh;
-	struct objcore *oc;
+	struct objcore *oc, *grace_oc;
 
 	CHECK_OBJ_NOTNULL(wrk, WORKER_MAGIC);
 	o = wrk->sp->req->obj;
@@ -627,6 +639,18 @@ HSH_Unbusy(struct worker *wrk)
 		hsh_rush(oh);
 	AN(oc->ban);
 	Lck_Unlock(&oh->mtx);
+	if (wrk->sp->req->grace_oc) {
+		grace_oc = wrk->sp->req->grace_oc;
+		CHECK_OBJ_NOTNULL(grace_oc, OBJCORE_MAGIC);
+		go = oc_getobj(wrk, grace_oc);
+		CHECK_OBJ_NOTNULL(go, OBJECT_MAGIC);
+		if (dropgrace && VRY_Compare(o->vary, go->vary)) {
+			wrk->stats.c_grace_obj_dropped++;
+			EXP_Remove(wrk, grace_oc);
+		}
+		assert(grace_oc->refcnt > 0);
+		HSH_Deref(wrk, NULL, &go);
+	}
 	assert(oc_getobj(wrk, oc) == o);
 }
 

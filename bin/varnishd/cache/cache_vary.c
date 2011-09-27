@@ -174,6 +174,29 @@ vry_cmp(const uint8_t *v1, const uint8_t *v2)
 }
 
 int
+VRY_Compare(const uint8_t *vary1, const uint8_t *vary2)
+{
+
+	if (vary1 == NULL && vary2 == NULL)
+		/* both are NULL */
+		return 1; 
+	if (vary1 == NULL || vary2 == NULL)
+		/* only one of them is NULL */
+		return 0;
+	while (vary1[2] && vary2[2]) {
+		if (vry_cmp(vary1, vary2))
+			/* header doesn't match */
+			return 0;
+		vary1 += vry_len(vary1);
+		vary2 += vry_len(vary2);
+	}
+	if (vary1[2] || vary2[2])
+		/* number of headers doesn't match */
+		return 0;
+	return 1;
+}
+
+int
 VRY_Match(const struct sess *sp, const uint8_t *vary)
 {
 	uint8_t *vsp = sp->req->vary_b;

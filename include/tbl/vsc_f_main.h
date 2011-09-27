@@ -232,7 +232,10 @@ VSC_F(n_backend,		uint64_t, 0, 'i', "N backends", "")
 
 VSC_F(n_expired,		uint64_t, 0, 'i', "N expired objects", "")
 VSC_F(n_lru_nuked,		uint64_t, 0, 'i', "N LRU nuked objects", "")
+VSC_F(c_removed,		uint64_t, 1, 'a', "N removed objects", "")
 VSC_F(n_lru_moved,		uint64_t, 0, 'i', "N LRU moved objects", "")
+VSC_F(c_grace_obj_dropped,	uint64_t, 1, 'i',
+		"Objects in grace dropped due to new object from backend", "")
 
 VSC_F(losthdr,		uint64_t, 0, 'a', "HTTP header overflows", "")
 

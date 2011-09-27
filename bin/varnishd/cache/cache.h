@@ -584,6 +584,7 @@ struct req {
 
 	const char		*doclose;
 	struct exp		exp;
+	struct objcore		*grace_oc;	/* == stale_oc */
 	unsigned		cur_method;
 	unsigned		handling;
 	unsigned char		sendbody;
@@ -753,6 +754,7 @@ void EXP_Init(void);
 void EXP_Rearm(const struct object *o);
 int EXP_Touch(struct objcore *oc);
 int EXP_NukeOne(struct worker *w, struct lru *lru);
+void EXP_Remove(struct worker *w, struct objcore *oc);
 
 /* cache_fetch.c */
 struct storage *FetchStorage(struct worker *w, ssize_t sz);
@@ -968,6 +970,7 @@ void RES_StreamPoll(struct worker *);
 
 /* cache_vary.c */
 struct vsb *VRY_Create(const struct sess *sp, const struct http *hp);
+int VRY_Compare(const uint8_t *vary1, const uint8_t *vary2);
 int VRY_Match(const struct sess *sp, const uint8_t *vary);
 void VRY_Validate(const uint8_t *vary);
 
