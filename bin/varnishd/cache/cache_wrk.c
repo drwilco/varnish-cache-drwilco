@@ -131,13 +131,13 @@ WRK_BgThread(pthread_t *thr, const char *name, bgthread_t *func, void *priv)
 /*--------------------------------------------------------------------*/
 
 static void *
-wrk_thread_real(void *priv, unsigned shm_workspace, unsigned sess_workspace,
-    unsigned siov)
+wrk_thread_real(void *priv, unsigned shm_workspace,
+    unsigned wthread_workspace, unsigned siov)
 {
 	struct worker *w, ww;
 	uint32_t wlog[shm_workspace / 4];
 	/* XXX: can we trust these to be properly aligned ? */
-	unsigned char ws[sess_workspace];
+	unsigned char ws[wthread_workspace];
 	struct iovec iov[siov];
 
 	THR_SetName("cache-worker");
@@ -152,7 +152,7 @@ wrk_thread_real(void *priv, unsigned shm_workspace, unsigned sess_workspace,
 	w->wrw.ciov = siov;
 	AZ(pthread_cond_init(&w->cond, NULL));
 
-	WS_Init(w->ws, "wrk", ws, sess_workspace);
+	WS_Init(w->ws, "wrk", ws, wthread_workspace);
 
 	VSL(SLT_WorkThread, 0, "%p start", w);
 
