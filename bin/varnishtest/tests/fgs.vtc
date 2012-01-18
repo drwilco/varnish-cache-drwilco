@@ -1,0 +1,62 @@
+varnishtest "Test director"
+
+server s1 {
+        rxreq
+        txresp -hdr "be: s1" -body "s1"
+        close
+
+        accept
+        rxreq
+        txresp -hdr "be: s1" -body "s1"
+} -start
+
+server s2 {
+        rxreq
+        txresp -hdr "be: s2" -body "s2"
+        close
+
+        accept
+        rxreq
+        txresp -hdr "be: s2" -body "s2"
+} -start
+
+server s3 {
+        rxreq
+        txresp -hdr "be: s3" -body "s3"
+        close
+
+        accept
+        rxreq
+        txresp -hdr "be: s3" -body "s3"
+} -start
+
+varnish v1 -vcl+backend {
+        director lc random {
+                { .backend = s1; .weight = 1; }
+                { .backend = s2; .weight = 1; }
+                { .backend = s3; .weight = 1; }
+        }
+
+        sub vcl_recv {
+                set req.backend = lc;
+                return (pass);
+        }
+} -start
+
+client c1 {
+        txreq
+        rxresp
+        expect resp.status == 200
+} -start
+
+client c2 {
+        txreq
+        rxresp
+        expect resp.status == 200
+} -start
+
+client c3 {
+        txreq
+        rxresp
+        expect resp.status == 200
+} -start
