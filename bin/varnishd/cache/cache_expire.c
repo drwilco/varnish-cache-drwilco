@@ -483,10 +483,10 @@ EXP_Remove(struct worker *w, struct objcore *oc)
 	CHECK_OBJ_NOTNULL(l, LRU_MAGIC);
 	VTAILQ_REMOVE(&l->lru_head, oc, lru_list);
 
+	w->stats.c_removed++;
+
 	Lck_Unlock(&exp_mtx);
 	Lck_Unlock(&l->mtx);
-
-	w->stats.c_removed++;
 
 	WSL(w, SLT_ExpKill, 0, "%u Removed", o->xid);
 	assert(oc->refcnt >= 2); /* exp ref and caller ref */

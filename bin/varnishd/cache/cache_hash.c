@@ -590,24 +590,35 @@ HSH_Purge(const struct sess *sp, struct objhead *oh, double ttl, double grace)
 void
 HSH_Drop(struct worker *wrk)
 {
-	struct object *o;
+	struct object *o, *go;
 
 	CHECK_OBJ_NOTNULL(wrk, WORKER_MAGIC);
+	CHECK_OBJ_NOTNULL(wrk->sp, SESS_MAGIC);
+	CHECK_OBJ_NOTNULL(wrk->sp->req, REQ_MAGIC);
 	o = wrk->sp->req->obj;
 	CHECK_OBJ_NOTNULL(o, OBJECT_MAGIC);
 	AssertObjCorePassOrBusy(o->objcore);
 	o->exp.ttl = -1.;
 	if (o->objcore != NULL)		/* Pass has no objcore */
-		HSH_Unbusy(wrk, 0);
+		HSH_Unbusy(wrk);
+	if (wrk->sp->req->grace_oc) {
+		go = oc_getobj(wrk, wrk->sp->req->grace_oc);
+		wrk->sp->req->grace_oc = NULL;
+		HSH_Deref(wrk, NULL, &go);
+	}
 	(void)HSH_Deref(wrk, NULL, &wrk->sp->req->obj);
 }
 
+/* 
+ * Either use HSH_Unbusy followed by HSH_DropGrace or use HSH_Drop
+ * Failing to use HSH_DropGrace will leak a ref
+ */
 void
-HSH_Unbusy(struct worker *wrk, int dropgrace)
+HSH_Unbusy(struct worker *wrk)
 {
-	struct object *o, *go;
+	struct object *o;
 	struct objhead *oh;
-	struct objcore *oc, *grace_oc;
+	struct objcore *oc;
 
 	CHECK_OBJ_NOTNULL(wrk, WORKER_MAGIC);
 	o = wrk->sp->req->obj;
@@ -639,19 +650,34 @@ HSH_Unbusy(struct worker *wrk, int dropgrace)
 		hsh_rush(oh);
 	AN(oc->ban);
 	Lck_Unlock(&oh->mtx);
+	assert(oc_getobj(wrk, oc) == o);
+}
+
+void
+HSH_DropGrace(struct worker *wrk)
+{
+	struct object *o, *go;
+	struct objcore *grace_oc;
+
+	CHECK_OBJ_NOTNULL(wrk, WORKER_MAGIC);
+	CHECK_OBJ_NOTNULL(wrk->sp, SESS_MAGIC);
+	CHECK_OBJ_NOTNULL(wrk->sp->req, REQ_MAGIC);
+	o = wrk->sp->req->obj;
+	CHECK_OBJ_NOTNULL(o, OBJECT_MAGIC);
+
 	if (wrk->sp->req->grace_oc) {
 		grace_oc = wrk->sp->req->grace_oc;
+		wrk->sp->req->grace_oc = NULL;
 		CHECK_OBJ_NOTNULL(grace_oc, OBJCORE_MAGIC);
 		go = oc_getobj(wrk, grace_oc);
 		CHECK_OBJ_NOTNULL(go, OBJECT_MAGIC);
-		if (dropgrace && VRY_Compare(o->vary, go->vary)) {
+		if (VRY_Compare(o->vary, go->vary)) {
 			wrk->stats.c_grace_obj_dropped++;
 			EXP_Remove(wrk, grace_oc);
 		}
 		assert(grace_oc->refcnt > 0);
 		HSH_Deref(wrk, NULL, &go);
 	}
-	assert(oc_getobj(wrk, oc) == o);
 }
 
 void

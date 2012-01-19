@@ -930,7 +930,8 @@ cnt_fetchbody(struct sess *sp, struct worker *wrk, struct req *req)
 		EXP_Insert(req->obj);
 		AN(req->obj->objcore);
 		AN(req->obj->objcore->ban);
-		HSH_Unbusy(wrk, 1);
+		HSH_Unbusy(wrk);
+		HSH_DropGrace(wrk);
 	}
 	VBO_DerefBusyObj(wrk, &wrk->busyobj);
 	wrk->acct_tmp.fetch++;
@@ -989,7 +990,8 @@ cnt_streambody(struct sess *sp, struct worker *wrk, struct req *req)
 		EXP_Insert(req->obj);
 		AN(req->obj->objcore);
 		AN(req->obj->objcore->ban);
-		HSH_Unbusy(wrk, 1);
+		HSH_Unbusy(wrk);
+		HSH_DropGrace(wrk);
 	} else {
 		req->doclose = "Stream error";
 	}

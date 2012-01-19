@@ -584,7 +584,7 @@ struct req {
 
 	const char		*doclose;
 	struct exp		exp;
-	struct objcore		*grace_oc;	/* == stale_oc */
+	struct objcore		*grace_oc;
 	unsigned		cur_method;
 	unsigned		handling;
 	unsigned char		sendbody;
